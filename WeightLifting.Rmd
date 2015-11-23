@@ -1,0 +1,171 @@
+---
+output: 
+  html_document: 
+    keep_md: yes
+---
+# Human Activity Recognition - Weight Lifting Exercise Dataset
+
+* Author: Ian Grundy
+* Date: 22 November 2015
+
+## Synopsis
+
+Wearable devices such as Jawbone Up, Nike FuelBand, and Fitbit make collecting large amounts of data about human activity very easy. Such human activity recognition (HAR) data has traditionally been used to predict, from a number of possibilities, which activity was performed at a specific point in time.  
+
+The focus of the Weight Lifting Dataset, analysed here, is slightly different. This data was collected to investigate *how well* one particular activity was performed by the wearer. Six participants were each asked to perform one set of 10 repetitions a single activity, the Unilateral Dumbbell Biceps Curl, in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). The supplied data was partitioned into training and test sets for prediction (and assessment) purposes.
+
+Here, we build a model for classifying the way each activity was performed (either A, B, C, D or E) based on the wearable device physical measurements, using the Random Forests method. The method is shown to be very accurate on this data, with a better than 99% out-of-sample accuracy. When supplied with the (unseen) test set of 20 cases, the method performed extremely well, getting all 20 cases correct.
+
+## Data 
+
+* Dataset: Weight lifting data, consisting of 
+* Training Set: 19622 observations of 160 variables
+* Test Set: 20 observations of 160 variables
+
+Read more: [http://groupware.les.inf.puc-rio.br/har#ixzz3sFLppXgK](http://groupware.les.inf.puc-rio.br/har#ixzz3sFLppXgK)
+
+## Pre-Processing the Data
+
+We begin by loading the packages we will need:
+
+```{r message=FALSE}
+library(ggplot2)
+library(lattice)
+library(caret)
+library(randomForest)
+```
+
+```{r echo=FALSE}
+fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+ 
+if (!file.exists("pml-training.csv"))
+{  
+    cat("Downloading Data Set")
+    download.file(fileURL, destfile="./pml-training.csv", method="curl")
+    cat("   ... downloaded training data\n")
+ 
+}
+
+fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+ 
+if (!file.exists("pml-testing.csv"))
+{  
+    cat("Downloading Data Set")
+    download.file(fileURL, destfile="./pml-testing.csv", method="curl")
+    cat("   ... downloaded testing data\n")
+ 
+}
+
+raw_training <- read.csv("pml-training.csv", na.strings=c("", "NA"))
+raw_testing <- read.csv("pml-testing.csv", na.strings=c("", "NA"))
+
+
+reduced_training <- raw_training[,colSums(is.na(raw_training)) < nrow(raw_training)/2]
+reduced_testing <- raw_testing[,colSums(is.na(raw_training)) < nrow(raw_training)/2]
+
+training <- reduced_training[, -c(1:7) ]
+testing <- reduced_testing[, -c(1:7) ]
+```
+
+We download the training data from
+
+[https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+and the test data from
+
+[https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+There are many missing values in the data, denoted "blank" or "NA". The blanks are converted to "NA" at read time.
+
+There are 406 rows in the dataset, corresponding to ```new_window = "yes"``` which have values for all 160 variables.
+The bulk of the data, i.e. the other 19216 rows, has missing values in 100 columns. These columns clearly have no prediction value. Any column with more than 50% missing values is removed from the training and testing data sets. 
+
+This leaves 60 columns, of which the first seven are identification variables (```X```, ```user_name```, ``` raw_timestamp_part_1```, ```raw_timestamp_part_2```, ```cvtd_timestamp```, ```new_window```, ```num_window```) which are not needed in the prediction process, and the last is the target variable for the classification task ```classe``` which takes values in the set {A, B, C, D, E}.
+
+We discard the first seven columns, retaining 52 predictors, plus the label/target variable ```classe```.
+
+The variables retained are 
+
+```{r echo=FALSE}
+names(training)
+```
+
+## Data Exploration and Dimension Reduction
+
+We explore the data to investigate whether the total of 52 predictor variables can or should be reduced.
+
+Firstly, we examine the variance of each of the predictors:
+
+```{r echo=FALSE}
+nearZeroVar(training[, -53], saveMetric = TRUE)
+```
+
+We cannot reduce the number of predictors on the basis of variance, as none of them can be classified as having zero or near-zero variance.
+
+Next, we turn to correlation. The correlation plot shown below shows the strength of the correlations between all 52 predictors:
+
+```{r echo=FALSE}
+library(corrplot)
+M <- cor(training[,-53])
+corrplot(M, method = "circle")
+```
+
+On the whole, with a only few exceptions, most of the variables are weakly correlated at best. This suggests that dimension reduction using, for example, principal components will not bring a significant benefit to the model.
+
+Consequently, the prediction model (see below) will use the raw values of all 52 predictors.
+
+## Partitioning the Data
+
+```{r echo=FALSE}
+set.seed(31415927)
+inTrain <- createDataPartition(training$classe, p = 0.75, list = FALSE)
+myTrain <- training[ inTrain,]
+myTest  <- training[-inTrain,]
+```
+
+In order to facilitate estimation of the out-of-sample classification error, we further partition the *training data* using ```createDataPartition()``` with ```p = 0.75``` to form a training set ```myTrain``` with 
+`r nrow(myTrain)` rows, and a testing set ```myTest``` with 
+`r nrow(myTest)` rows. 
+
+## Building the Model
+
+We choose here to build our prediction model using Random Forests, which is well known as a very accurate prediction method that runs efficiently on big data and can thousands of input variables. For our purposes, it is also very useful that Random Forests generate an internal unbiased estimate of the out-of-sample error as part of the forest building process.
+
+Random Forests work by taking ```N``` samples (with replacement) of the training data. A decision tree is built for each of the ```N``` samples. At each split in each tree, only a random subset of size ```m``` of the ```M``` predictor variables is used. Predicted values are obtained by averaging the predictions of the ```N``` decision trees. 
+
+We have chosen here to use Random Forests with the options ```method = "cv"``` and  ```number = 10```. This means that the Random Forests algorithm will use cross validation with 10 folds to tune the ```m``` parameter. The tuning process makes use of the ```OOB``` or "out-of-bag" error to choose the best model, and this ```OOB``` error serves as a good estimate of the out-of-sample error. 
+
+```{r randomforest, echo=FALSE, cache=TRUE}
+set.seed(31415927)
+modelfit <- train(classe ~ . , data = myTrain, method = "rf", trControl = trainControl(method = "cv", number = 10))
+```
+
+Note - our model is trained using the ```myTrain``` data only. 
+
+The final model and properties of the fit are shown below:
+
+```{r echo=FALSE}
+print(modelfit)
+print(modelfit$finalModel)
+```
+
+As we can see above, ```mtry``` parameter (which represents ```m``` above) has an optimal value of 27.  The ```OOB``` error rate is estimated to be 0.66%. 
+
+## Out-of-Sample Error
+
+We now estimate the out-of-sample error *directly* using the testing set ```myTest```:
+
+```{r echo=FALSE}
+predictions <- predict(modelfit, newdata = myTest)
+print(confusionMatrix(predictions, myTest$classe))
+```
+
+On the held-out ```myTest``` data, the prediction accuracy is 99.23%, or in other words, the expected out-of-sample error rate is 0.77%. This agrees closely with the out-of-sample error estimate generated by Random Forests. 
+
+Based on ```myTest``` , we expect a greater than 99% accuracy for this classifier.
+
+## Performance on the Test Data
+
+It remains to determine how the classifier actually performs on the unlabelled test set. For the 20 cases given, the classifier predicts all 20 correctly.
+
+
